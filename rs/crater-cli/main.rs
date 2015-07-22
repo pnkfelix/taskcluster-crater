@@ -1,3 +1,4 @@
+extern crate backtrace;
 extern crate hyper;
 extern crate rustc_serialize;
 #[macro_use]
@@ -30,7 +31,12 @@ pub struct Config {
 }
 
 fn main() {
-    run().unwrap();
+    match run() {
+        Ok(()) => {}
+        Err(e) => {
+            panic!("{:#?}", e);
+        }
+    }
 }
 
 fn run() -> Result<(), Error> {
@@ -116,7 +122,7 @@ fn run_run(config: Config, opts: Opts) -> Result<(), Error> {
             println!("{}", s);
             Ok(())
         }
-        Err(Error::StdIoError(ref e)) => {
+        Err(Error::StdIoError(ref e, _)) => {
             try!(writeln!(std::io::stderr(),
                      "server reported an error executing node.js process"));
             try!(writeln!(std::io::stderr(), ""));
@@ -130,22 +136,78 @@ fn run_run(config: Config, opts: Opts) -> Result<(), Error> {
 #[derive(Debug)]
 enum Error {
     OptParse,
-    StdError(Box<StdError + Send>),
-    StdIoError(v1::StdIoResponse)
+    StdError(Box<StdError + Send>, StackTrace),
+    StdIoError(v1::StdIoResponse, StackTrace)
+}
+
+#[derive(Debug)]
+struct StackTrace {
+    frames: Vec<StackFrame>,
+}
+
+use std::os::raw::c_void;
+
+#[derive(Debug)]
+struct StackFrame {
+    ip: *mut c_void,
+    sym: Option<Sym>,
+}
+
+#[derive(Debug)]
+struct Sym {
+    name: Option<String>,
+    addr: Option<*mut c_void>,
+    filename: Option<String>,
+    lineno: Option<u32>,
+}
+
+fn capture_stacktrace() -> StackTrace {
+    let mut frames = Vec::new();
+    backtrace::trace(&mut |frame| {
+        let ip = frame.ip();
+        let mut sym: Option<Sym> = None;
+
+        backtrace::resolve(ip, &mut |symbol| {
+            let mut new_sym = Sym {
+                name: None, addr: None, filename: None, lineno: None
+            };
+            if let Some(name) = symbol.name() {
+                let name = String::from_utf8_lossy(name).into_owned();
+                new_sym.name = Some(name);
+            }
+            if let Some(addr) = symbol.addr() {
+                new_sym.addr = Some(addr);
+            }
+            if let Some(filename) = symbol.filename() {
+                let filename = String::from_utf8_lossy(filename).into_owned();
+                new_sym.filename = Some(filename);
+            }
+            if let Some(lineno) = symbol.lineno() {
+                new_sym.lineno = Some(lineno);
+            }
+
+            sym = Some(new_sym);
+        });
+
+        frames.push(StackFrame { ip: ip, sym: sym });
+        true // keep going to the next frame
+    });
+
+    StackTrace { frames: frames }
 }
 
 impl StdError for Error {
     fn description(&self) -> &str {
         match *self {
             Error::OptParse => "bad arguments",
-            Error::StdError(ref e) => e.description(),
-            Error::StdIoError(ref e) => &*e.stderr
+            Error::StdError(ref e, _) => e.description(),
+            Error::StdIoError(ref e, _) => &*e.stderr
         }
     }
 
     fn cause(&self) -> Option<&StdError> {
         match *self {
-            Error::StdError(ref e) => Some(&**e),
+            Error::StdError(ref e, _) => Some(&**e),
             _ => None
         }
     }
@@ -160,37 +222,37 @@ impl Display for Error {
 
 impl From<io::Error> for Error {
     fn from(e: io::Error) -> Error {
-        Error::StdError(Box::new(e))
+        Error::StdError(Box::new(e), capture_stacktrace())
     }
 }
 
 impl From<json::DecoderError> for Error {
     fn from(e: json::DecoderError) -> Error {
-        Error::StdError(Box::new(e))
+        Error::StdError(Box::new(e), capture_stacktrace())
     }
 }
 
 impl From<json::EncoderError> for Error {
     fn from(e: json::EncoderError) -> Error {
-        Error::StdError(Box::new(e))
+        Error::StdError(Box::new(e), capture_stacktrace())
     }
 }
 
 impl From<hyper::Error> for Error {
     fn from(e: hyper::Error) -> Error {
-        Error::StdError(Box::new(e))
+        Error::StdError(Box::new(e), capture_stacktrace())
     }
 }
 
 impl From<log::SetLoggerError> for Error {
     fn from(e: log::SetLoggerError) -> Error {
-        Error::StdError(Box::new(e))
+        Error::StdError(Box::new(e), capture_stacktrace())
     }
 }
 
 impl From<v1::StdIoResponse> for Error {
     fn from(e: v1::StdIoResponse) -> Error {
-        Error::StdIoError(e)
+        Error::StdIoError(e, capture_stacktrace())
     }
 }
 

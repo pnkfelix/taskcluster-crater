@@ -25,6 +25,7 @@ mount = "*"
 log = "*"
 env_logger = "*"
 rustc-serialize = "*"
+backtrace = "*"
 
 # Coordinates builds into crater jobs
 [dependencies.crater-engine]
